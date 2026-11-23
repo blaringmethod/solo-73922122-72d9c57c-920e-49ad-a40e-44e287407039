@@ -1,0 +1,151 @@
+{% extends "base.html" %}
+{% block title %}{{ project.name }} · 分米底图转换{% endblock %}
+{% block body %}
+<nav class="crumbs"><a href="{{ url_for('index') }}">← 返回任务列表</a></nav>
+<section class="card">
+  <h2>{{ project.name }}
+    <span class="muted">（#{{ project.id }}，{{ project.rows }}×{{ project.cols }} 格）</span>
+  </h2>
+
+  <div class="actions">
+    <form action="{{ url_for('download_dm', project_id=project.id) }}" method="get">
+      <button type="submit" {% if not downloadable %}disabled title="尚无可下载的成功底图"{% endif %}>
+        下载当前分米 CSV
+      </button>
+    </form>
+    <form action="{{ url_for('reconvert', project_id=project.id) }}" method="post" class="inline">
+      <label>最大允许误差（cm）
+        <input type="number" name="error_limit" min="0" step="1"
+               value="{{ latest.error_limit if latest else 9 }}" required>
+      </label>
+      <button type="submit">按当前厘米底图重新转换（沿用锁定）</button>
+    </form>
+  </div>
+
+  {% if latest and latest.status != 'ok' %}
+  <p class="flash error">
+    最近一次转换失败（{{ '误差限内无解' if latest.status == 'tight' else '锁定与流向冲突' }}），
+    页面下方仍展示<strong>上一份可下载底图</strong>，锁定值未受影响。
+  </p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>格网对照（当前工作厘米底图 vs 可下载分米底图）</h2>
+  <p class="muted">
+    每格上行为高程、下行为流向（↑↓←→，· 表示无下坡；多箭头表示并列最低）。
+    分米格第三行括号内为实际误差（cm），<mark>L</mark> 表示该格已锁定。
+  </p>
+  <div class="tables">
+    <div>
+      <h3>厘米输入</h3>
+      <table class="grid">
+        {% for r in range(project.rows) %}
+        <tr>
+          {% for c in range(project.cols) %}
+          <td>
+            <span class="elev">{{ input_cm[r][c] }}</span>
+            <span class="flow">{{ flow_cm[r][c] }}</span>
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </table>
+    </div>
+    <div>
+      <h3>分米输出{% if downloadable %}（快照 #{{ downloadable.id }}）{% else %}：暂无成功结果{% endif %}</h3>
+      {% if grid_dm %}
+      <table class="grid dm">
+        {% for r in range(project.rows) %}
+        <tr>
+          {% for c in range(project.cols) %}
+          <td class="{% if lock_cells.get((r,c)) is not none %}locked{% endif %}">
+            <span class="elev">{{ grid_dm[r][c] }}</span>
+            <span class="flow">{{ flow_dm[r][c] }}</span>
+            <span class="err">{{ '%+d'|format(errors[r][c]) }}</span>
+            {% if lock_cells.get((r,c)) is not none %}<span class="lockmark" title="锁定 {{ lock_cells[(r,c)] }} dm">L</span>{% endif %}
+          </td>
+          {% endfor %}
+        </tr>
+        {% endfor %}
+      </table>
+      {% else %}
+      <p class="muted">尚无成功转换，因此没有可下载底图。</p>
+      {% endif %}
+    </div>
+  </div>
+</section>
+
+<section class="card">
+  <h2>锁定分米值（沟口等关键位置）</h2>
+  <form action="{{ url_for('add_lock', project_id=project.id) }}" method="post" class="inline">
+    <label>行（1–{{ project.rows }}）<input type="number" name="row" min="1" max="{{ project.rows }}" required></label>
+    <label>列（1–{{ project.cols }}）<input type="number" name="col" min="1" max="{{ project.cols }}" required></label>
+    <label>分米值（整数）<input type="number" name="dm_value" step="1" required></label>
+    <button type="submit">保存 / 覆盖锁定</button>
+  </form>
+  {% if locks %}
+  <table>
+    <thead><tr><th>行</th><th>列</th><th>锁定分米值</th><th></th></tr></thead>
+    <tbody>
+    {% for l in locks %}
+      <tr>
+        <td>{{ l.row_idx + 1 }}</td><td>{{ l.col_idx + 1 }}</td><td>{{ l.dm_value }}</td>
+        <td>
+          <form action="{{ url_for('delete_lock', project_id=project.id, row=l.row_idx, col=l.col_idx) }}"
+                method="post" class="inline">
+            <button class="small danger" type="submit">删除锁定</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">暂无锁定。</p>
+  {% endif %}
+</section>
+
+<section class="card">
+  <h2>上传测绘更正（同尺寸 CSV）</h2>
+  <p class="muted">更正上传会自动沿用上面的全部锁定值重新转换；失败时锁定与上一份可下载底图保留不变。</p>
+  <form action="{{ url_for('upload_correction', project_id=project.id) }}"
+        method="post" enctype="multipart/form-data" class="grid-form">
+    <label>更正 CSV（必须为 {{ project.rows }}×{{ project.cols }}）
+      <input type="file" name="csv_file" accept=".csv,text/csv" required>
+    </label>
+    <label>最大允许误差（cm）
+      <input type="number" name="error_limit" min="0" step="1" value="{{ latest.error_limit if latest else 9 }}" required>
+    </label>
+    <button type="submit">沿用锁定并转换更正</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>转换历史（最近 10 条）</h2>
+  <table>
+    <thead><tr><th>快照</th><th>类型</th><th>来源文件</th><th>误差限</th><th>最小可行误差</th><th>状态</th><th>时间 (UTC)</th></tr></thead>
+    <tbody>
+    {% for s in snapshots %}
+      <tr>
+        <td>#{{ s.id }}</td>
+        <td>
+          {% if s.kind == 'initial' %}初次转换
+          {% elif s.kind == 'correction' %}测绘更正
+          {% else %}重新转换{% endif %}
+        </td>
+        <td>{{ s.source_name or '—' }}</td>
+        <td>{{ s.error_limit }} cm</td>
+        <td>{{ s.min_error if s.min_error is not none else '—' }}{% if s.min_error is not none %} cm{% endif %}</td>
+        <td>
+          {% if s.status == 'ok' %}<span class="tag ok">成功</span>
+          {% elif s.status == 'tight' %}<span class="tag tight">误差过紧</span>
+          {% else %}<span class="tag conflict">锁定冲突</span>{% endif %}
+        </td>
+        <td>{{ s.created_at }}</td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+</section>
+{% endblock %}

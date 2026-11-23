@@ -1,0 +1,10 @@
+__pycache__/
+*.pyc
+app/local_data/
+local_data/
+*.db
+.venv/
+.git/
+.gitignore
+tests/
+README.md

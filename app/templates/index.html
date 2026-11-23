@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% block body %}
+<section class="card">
+  <h2>新建转换任务</h2>
+  <form action="{{ url_for('create_project') }}" method="post" enctype="multipart/form-data" class="grid-form">
+    <label>任务名称
+      <input type="text" name="name" placeholder="例如：北坡 1 号地块" required>
+    </label>
+    <label>整数厘米高程 CSV（≤ {{ max_dim }}×{{ max_dim }} 格）
+      <input type="file" name="csv_file" accept=".csv,text/csv" required>
+    </label>
+    <label>最大允许误差（厘米，非负整数）
+      <input type="number" name="error_limit" min="0" step="1" value="9" required>
+    </label>
+    <button type="submit">上传并转换</button>
+  </form>
+</section>
+
+<section class="card">
+  <h2>已有任务</h2>
+  {% if projects %}
+  <table>
+    <thead><tr><th>ID</th><th>名称</th><th>尺寸</th><th>锁定数</th><th>最近结果</th><th>创建时间</th><th></th></tr></thead>
+    <tbody>
+    {% for p in projects %}
+      <tr>
+        <td>{{ p.id }}</td>
+        <td><a href="{{ url_for('view_project', project_id=p.id) }}">{{ p.name }}</a></td>
+        <td>{{ p.rows }}×{{ p.cols }}</td>
+        <td>{{ p.lock_count }}</td>
+        <td>
+          {% if p.last_status == 'ok' %}<span class="tag ok">成功</span>
+          {% elif p.last_status == 'tight' %}<span class="tag tight">误差过紧</span>
+          {% elif p.last_status == 'conflict' %}<span class="tag conflict">锁定冲突</span>
+          {% else %}—{% endif %}
+        </td>
+        <td>{{ p.created_at }}</td>
+        <td>
+          <form action="{{ url_for('delete_project', project_id=p.id) }}" method="post"
+                onsubmit="return confirm('确认删除该任务及其全部快照与锁定？');">
+            <button class="small danger" type="submit">删除</button>
+          </form>
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  {% else %}
+  <p class="muted">暂无任务。可使用仓库 <code>sample/</code> 目录中的示例 CSV 体验。</p>
+  {% endif %}
+</section>
+{% endblock %}
