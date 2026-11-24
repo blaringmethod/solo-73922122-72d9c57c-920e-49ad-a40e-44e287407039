@@ -7,6 +7,18 @@
     <span class="muted">（#{{ project.id }}，{{ project.rows }}×{{ project.cols }} 格）</span>
   </h2>
 
+  <div class="trial">
+    <strong>误差试算：</strong>
+    {% if current_conflict %}
+      当前锁定值与流向要求冲突，<span class="bad">放宽误差也无解</span>，请调整或删除锁定。
+    {% else %}
+      当前工作底图 + {{ locks|length }} 个锁定下，最小可行误差为
+      <mark>{{ current_min_error }} cm</mark>。误差限设为该值或更大即可转换。
+    {% endif %}
+    <form action="{{ url_for('trial_min_error', project_id=project.id) }}" method="post" class="inline">
+      <button class="small" type="submit">改锁后立即试算</button>
+    </form>
+  </div>
   <div class="actions">
     <form action="{{ url_for('download_dm', project_id=project.id) }}" method="get">
       <button type="submit" {% if not downloadable %}disabled title="尚无可下载的成功底图"{% endif %}>

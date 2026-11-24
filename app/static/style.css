@@ -80,5 +80,12 @@ table.grid td.locked { background: var(--lock); }
 .flash.ok { background: #e6f4ec; border: 1px solid var(--ok); color: var(--ok); }
 .flash.error { background: #fdeaea; border: 1px solid var(--err); color: var(--err); }
 .flashes { margin-bottom: 8px; }
+.trial {
+  background: #eef7fb; border: 1px solid #b6dbe9; border-radius: 8px;
+  padding: 10px 14px; margin-bottom: 14px; font-size: 14px;
+  display: flex; flex-wrap: wrap; gap: 10px; align-items: center;
+}
+.trial form.inline { margin-left: auto; }
+.bad { color: var(--err); font-weight: 600; }
 mark { background: var(--lock); padding: 0 3px; border-radius: 3px; }
 code { background: #eef2f5; padding: 1px 5px; border-radius: 4px; }

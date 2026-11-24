@@ -10,7 +10,6 @@
 
 from __future__ import annotations
 
-import io
 import json
 import os
 import sqlite3
@@ -32,6 +31,7 @@ from .solver import (
     ValidationError,
     convert,
     flow_sets,
+    min_feasible_error,
     parse_csv,
     to_csv,
 )
@@ -132,6 +132,27 @@ def _latest_snapshot(conn: sqlite3.Connection, project_id: int) -> sqlite3.Row |
     ).fetchone()
 
 
+def _working_snapshot(conn: sqlite3.Connection, project_id: int) -> sqlite3.Row | None:
+    """当前工作底图：最新成功快照；从未成功时退回最初的首次上传。
+
+    失败的更正/重转只新增失败快照，不会改变这里的选择，因此下载、重转
+    和误差试算始终围绕同一份原工作底图，直到出现新的成功快照。
+    """
+    ok = _latest_ok_snapshot(conn, project_id)
+    if ok is not None:
+        return ok
+    return conn.execute(
+        "SELECT * FROM snapshots WHERE project_id = ? AND kind = 'initial' "
+        "ORDER BY id ASC LIMIT 1",
+        (project_id,),
+    ).fetchone()
+
+
+def _working_grid(conn: sqlite3.Connection, project_id: int) -> list[list[int]] | None:
+    source = _working_snapshot(conn, project_id)
+    return json.loads(source["input_cm"]) if source is not None else None
+
+
 def _read_upload(file_storage) -> str:
     if file_storage is None or not file_storage.filename:
         raise ValidationError("请选择要上传的 CSV 文件")
@@ -178,17 +199,25 @@ def _dashboard_context(conn: sqlite3.Connection, project: sqlite3.Row) -> dict:
 
     latest = _latest_snapshot(conn, project["id"])
     ok = _latest_ok_snapshot(conn, project["id"])
-    # 可下载底图始终取最新成功快照；失败尝试不会覆盖它。
-    source = ok if ok is not None else latest
+    # 可下载底图 / 重转 / 试算都以同一份“当前工作底图”为准：
+    # 最新成功快照，失败尝试（含失败的更正）不会覆盖它。
+    source = _working_snapshot(conn, project["id"])
     input_cm = json.loads(source["input_cm"])
     grid_dm = json.loads(source["grid_dm"]) if source["grid_dm"] else None
     errors = json.loads(source["errors"]) if source["errors"] else None
+
+    # 底图页的误差试算：当前工作厘米底图 + 当前锁定，直接给出精确最小
+    # 可行误差。同一份格网复用缓存的流向约束图，改锁只需重跑一次
+    # 11 标签扫描 + 逐格汇总，不针对候选误差反复检查全图。
+    lock_cells = _load_locks(conn, project["id"])
+    current_min_error = min_feasible_error(input_cm, lock_cells)
+
 
     return {
         "project": project,
         "snapshots": snaps,
         "locks": lock_rows,
-        "lock_cells": _load_locks(conn, project["id"]),
+        "lock_cells": lock_cells,
         "latest": latest,
         "downloadable": ok,
         "input_cm": input_cm,
@@ -196,6 +225,8 @@ def _dashboard_context(conn: sqlite3.Connection, project: sqlite3.Row) -> dict:
         "errors": errors,
         "flow_cm": _arrow_table(input_cm),
         "flow_dm": _arrow_table(grid_dm) if grid_dm is not None else None,
+        "current_min_error": current_min_error,
+        "current_conflict": current_min_error is None,
         "max_dim": MAX_DIM,
     }
 
@@ -305,11 +336,7 @@ def reconvert(project_id: int):
 
     # 重新转换始终基于当前工作底图（最新成功快照的厘米输入）；
     # 若从未成功过，则退回项目最初上传的那份输入。失败尝试不会改变它。
-    ok = _latest_ok_snapshot(conn, project_id)
-    source = ok if ok is not None else conn.execute(
-        "SELECT * FROM snapshots WHERE project_id = ? AND kind = 'initial' "
-        "ORDER BY id ASC LIMIT 1", (project_id,)
-    ).fetchone()
+    source = _working_snapshot(conn, project_id)
     grid = json.loads(source["input_cm"])
     locks = _load_locks(conn, project_id)
 
@@ -462,6 +489,34 @@ def upload_correction(project_id: int):
                 "error",
             )
     conn.commit()
+    return redirect(url_for("view_project", project_id=project_id))
+
+
+@app.route("/projects/<int:project_id>/min-error", methods=["POST"])
+def trial_min_error(project_id: int):
+    """只试算最小可行误差，不生成快照、不改变可下载底图。"""
+    conn = get_db()
+    project = conn.execute("SELECT * FROM projects WHERE id = ?", (project_id,)).fetchone()
+    if project is None:
+        flash("底图不存在", "error")
+        return redirect(url_for("index"))
+    grid = _working_grid(conn, project_id)
+    if grid is None:
+        flash("尚无可试算的厘米底图。", "error")
+        return redirect(url_for("view_project", project_id=project_id))
+    locks = _load_locks(conn, project_id)
+    minimum = min_feasible_error(grid, locks)
+    if minimum is None:
+        flash(
+            "当前锁定值与流向要求无法同时满足：放宽误差也无解，请调整或删除锁定。",
+            "error",
+        )
+    else:
+        flash(
+            f"当前 {len(locks)} 个锁定下，最小可行误差为 {minimum} cm；"
+            f"把最大允许误差设为 {minimum} cm 或更大即可转换。",
+            "ok",
+        )
     return redirect(url_for("view_project", project_id=project_id))
 
 

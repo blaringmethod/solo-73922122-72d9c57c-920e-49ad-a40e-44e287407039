@@ -165,6 +165,60 @@ class WebFlowTest(unittest.TestCase):
             good_dl,
         )
 
+    def test_trial_min_error_after_lock_change(self):
+        page = _upload(self.client, SAMPLE, 9)
+        pid = int(page.request.path.rstrip("/").split("/")[-1])
+
+        # 底图页开箱即显示当前最小可行误差（7 cm）
+        text = page.get_data(as_text=True)
+        self.assertIn("最小可行误差为", text)
+        self.assertIn("7 cm", text)
+
+        # 改锁后无需转换即可试算：锁定 100 dm 时最小误差 = 683 cm
+        self.client.post(f"/projects/{pid}/locks",
+                         data={"row": "1", "col": "1", "dm_value": "100"})
+        resp = self.client.post(f"/projects/{pid}/min-error", follow_redirects=True)
+        text = resp.get_data(as_text=True)
+        self.assertIn("683 cm", text)
+
+        # 试算不产生快照、不改变可下载底图
+        before = self._snapshot_count(pid)
+        self.client.post(f"/projects/{pid}/min-error", follow_redirects=True)
+        self.assertEqual(self._snapshot_count(pid), before)
+
+        # 删除锁定后回来，最小误差恢复
+        self.client.post(f"/projects/{pid}/locks/0/0/delete")
+        resp = self.client.post(f"/projects/{pid}/min-error", follow_redirects=True)
+        self.assertIn("7 cm", resp.get_data(as_text=True))
+
+    def test_trial_reports_conflict(self):
+        page = _upload(self.client, SAMPLE, 9)
+        pid = int(page.request.path.rstrip("/").split("/")[-1])
+        self.client.post(f"/projects/{pid}/locks",
+                         data={"row": "6", "col": "6", "dm_value": "17"})
+        self.client.post(f"/projects/{pid}/locks",
+                         data={"row": "6", "col": "5", "dm_value": "16"})
+        resp = self.client.post(f"/projects/{pid}/min-error", follow_redirects=True)
+        self.assertIn("放宽误差也无解", resp.get_data(as_text=True))
+
+    def test_lock_reconvert_uses_same_working_grid(self):
+        page = _upload(self.client, SAMPLE, 9)
+        pid = int(page.request.path.rstrip("/").split("/")[-1])
+        good = self.client.get(f"/projects/{pid}/download").get_data(as_text=True)
+
+        # 失败的重转不改变工作底图：后续重转仍从原厘米格网出发
+        self.client.post(f"/projects/{pid}/locks",
+                         data={"row": "1", "col": "1", "dm_value": "33"})
+        resp = self.client.post(f"/projects/{pid}/convert", data={"error_limit": "0"},
+                                follow_redirects=True)
+        self.assertIn("最小可行误差", resp.get_data(as_text=True))
+        self.client.post(f"/projects/{pid}/locks/0/0/delete")
+        resp = self.client.post(f"/projects/{pid}/convert", data={"error_limit": "9"},
+                                follow_redirects=True)
+        self.assertIn("转换成功", resp.get_data(as_text=True))
+        self.assertEqual(flow_sets(parse_csv(good)), flow_sets(parse_csv(
+            self.client.get(f"/projects/{pid}/download").get_data(as_text=True))))
+
     def _snapshot_count(self, pid):
         import sqlite3
         conn = sqlite3.connect(webapp.DB_PATH)

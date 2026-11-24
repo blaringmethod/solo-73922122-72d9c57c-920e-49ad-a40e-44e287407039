@@ -9,10 +9,13 @@ ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, os.path.join(ROOT, "app"))
 
 import solver  # noqa: E402
-from solver import (  # noqa: E402
+from solver import (  # noqa: E402  # noqa: E402
+    FlowSystem,
     ValidationError,
     convert,
     flow_sets,
+    get_system,
+    min_feasible_error,
     naive_round,
     parse_csv,
     solve_at,
@@ -180,6 +183,140 @@ class TestConvert(unittest.TestCase):
     def test_bad_error_value(self):
         with self.assertRaises(ValidationError):
             convert(self.grid, {}, -1)
+
+
+class TestExactMinError(unittest.TestCase):
+    """最小误差精确性、复用与改锁后重算误差。"""
+
+    def setUp(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "sample", "slope_cm.csv")
+        with open(path, encoding="utf-8") as fh:
+            self.grid = parse_csv(fh.read())
+
+    def _reference_min(self, grid, locks):
+        """与精确算法无关的独立参考：按 E 从小到大逐个校验。"""
+        for limit in range(0, 4000):
+            if solve_at(grid, locks, limit) is not None:
+                return limit
+        return None
+
+    def test_matches_sequential_search(self):
+        import random
+
+        rng = random.Random(20261123)
+        cases = [(self.grid, {}), (self.grid, {(5, 5): 8}), (self.grid, {(0, 0): 33})]
+        for _ in range(12):
+            rows, cols = 3, 3
+            grid = [[rng.randint(-40, 60) for _ in range(cols)] for _ in range(rows)]
+            locks = {}
+            for _ in range(rng.randint(1, 3)):
+                locks[(rng.randrange(rows), rng.randrange(cols))] = rng.randint(-6, 8)
+            cases.append((grid, locks))
+        for grid, locks in cases:
+            with self.subTest(grid=grid[:1], locks=locks):
+                exact = min_feasible_error(grid, locks)
+                self.assertEqual(exact, self._reference_min(grid, locks))
+
+    def test_far_lock_reports_exact_value(self):
+        # 锁定值远高于测绘高程：最小误差必须至少覆盖锁定自身偏差。
+        locks = {(0, 0): 100}  # 该格 317 cm，锁定 100 dm = 1000 cm，偏差 683 cm
+        exact = min_feasible_error(self.grid, locks)
+        self.assertEqual(exact, 683)
+        self.assertEqual(convert(self.grid, locks, 682)["reason"], "error_too_tight")
+        self.assertEqual(convert(self.grid, locks, 682)["min_error_cm"], 683)
+        self.assertTrue(convert(self.grid, locks, 683)["feasible"])
+
+    def test_far_lock_below_reports_exact_value(self):
+        locks = {(0, 0): -50}  # 317 cm 对 -500 cm，偏差 817 cm
+        exact = min_feasible_error(self.grid, locks)
+        self.assertIsNotNone(exact)
+        self.assertGreaterEqual(exact, 817)
+        self.assertTrue(convert(self.grid, locks, exact)["feasible"])
+        self.assertFalse(convert(self.grid, locks, exact - 1)["feasible"])
+
+    def test_conflict_detected_for_all_errors(self):
+        locks = {(5, 5): 17, (5, 4): 16}
+        for limit in (0, 50, 10_000, 10**6):
+            result = convert(self.grid, locks, limit)
+            self.assertEqual(result["reason"], "hard_conflict")
+
+    def test_reuses_system_and_recomputes_error_after_change(self):
+        # 同一份厘米格网：改锁复用同一张约束图，但最小误差按新锁定重算。
+        s1 = get_system(self.grid)
+        s2 = get_system([row[:] for row in self.grid])
+        self.assertIs(s1, s2)
+        base = min_feasible_error(self.grid, {})
+        far = min_feasible_error(self.grid, {(0, 0): 100})
+        self.assertNotEqual(base, far)
+        self.assertEqual(far, 683)
+
+    def test_correction_same_flow_new_height_recomputes(self):
+        # 更正后流向结构可能相同，但误差必须按新的厘米高程计算。
+        corrected = [row[:] for row in self.grid]
+        corrected[0][0] += 40
+        base = convert(self.grid, {}, 9)
+        upd = convert(corrected, {}, 9)
+        self.assertTrue(base["feasible"] and upd["feasible"])
+        self.assertEqual(flow_sets(corrected), flow_sets(upd["grid_dm"]))
+        self.assertEqual(upd["grid_dm"][0][0], (corrected[0][0] + 5) // 10)
+        # 新格网的最小误差独立重算，与旧值的可行性判断一致
+        exact = min_feasible_error(corrected, {})
+        self.assertTrue(convert(corrected, {}, exact)["feasible"])
+
+
+class TestSweepCost(unittest.TestCase):
+    """最小误差只做一次全图扫描，不随候选误差个数增长。"""
+
+    def test_min_error_sweeps_once(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "sample", "slope_cm.csv")
+        with open(path, encoding="utf-8") as fh:
+            grid = parse_csv(fh.read())
+
+        class Counting(FlowSystem):
+            def __init__(self, g):
+                super().__init__(g)
+                self.sweeps = 0
+
+            def _sweep(self, state, labels):
+                self.sweeps += 1
+                return super()._sweep(state, labels)
+
+        system = Counting(grid)
+        system.min_error(grid, {})
+        self.assertEqual(system.sweeps, 1)
+        system.min_error(grid, {(5, 5): 8})
+        self.assertEqual(system.sweeps, 2)  # 改锁只再扫一次
+
+    def test_repeated_trial_uses_result_cache(self):
+        path = os.path.join(os.path.dirname(__file__), "..", "sample", "slope_cm.csv")
+        with open(path, encoding="utf-8") as fh:
+            grid = parse_csv(fh.read())
+
+        class Counting(FlowSystem):
+            def __init__(self, g):
+                super().__init__(g)
+                self.sweeps = 0
+
+            def _sweep(self, state, labels):
+                self.sweeps += 1
+                return super()._sweep(state, labels)
+
+        solver.clear_cache()
+        first = Counting(grid)
+        # 直接把 Counting 实例放入系统缓存，验证重复试算命中结果缓存
+        original_get = solver.get_system
+        solver.get_system = lambda g: first
+        try:
+            a = min_feasible_error(grid, {})
+            b = min_feasible_error(grid, {})
+            self.assertEqual(first.sweeps, 1)  # 第二次直接命中最小误差结果缓存
+            # 改锁后必须重新扫描并更新结果
+            c = min_feasible_error(grid, {(5, 5): 11})
+        finally:
+            solver.get_system = original_get
+        self.assertEqual(a, b)
+        self.assertEqual(first.sweeps, 2)
+        self.assertNotEqual(a, c)
 
 
 if __name__ == "__main__":
